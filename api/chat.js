@@ -8,6 +8,8 @@ const AVAILABLE_MODELS = [
   "gemini-2.0-flash"
 ];
 
+const REQUEST_TIMEOUT = 30000; // 30 ثانية
+
 function json(data, status = 200) {
   return new Response(
     JSON.stringify(data),
@@ -21,31 +23,32 @@ function json(data, status = 200) {
   );
 }
 
-export default async function handler(request) {
 
-  // OPTIONS
-  if (request.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
-      }
-    });
-  }
+/* =========================================================
+   GET
+   ========================================================= */
 
-  // POST فقط
-  if (request.method !== "POST") {
-    return json({
-      ok: false,
-      error: "Method Not Allowed"
-    }, 405);
-  }
+export async function GET() {
+  return json({
+    ok: true,
+    service: "NOVA AI",
+    status: "online"
+  });
+}
+
+
+/* =========================================================
+   POST
+   ========================================================= */
+
+export async function POST(request) {
 
   try {
 
-    // قراءة التوكن من Vercel Environment Variables
+    /* -----------------------------------------------------
+       Authorization من Vercel
+       ----------------------------------------------------- */
+
     const authorization =
       process.env.BEGAMOB_AUTHORIZATION || "";
 
@@ -53,11 +56,15 @@ export default async function handler(request) {
       return json({
         ok: false,
         error:
-          "BEGAMOB_AUTHORIZATION غير موجود في إعدادات Vercel."
+          "BEGAMOB_AUTHORIZATION غير موجود في Vercel."
       }, 500);
     }
 
-    // قراءة البيانات
+
+    /* -----------------------------------------------------
+       قراءة JSON
+       ----------------------------------------------------- */
+
     let body;
 
     try {
@@ -69,9 +76,13 @@ export default async function handler(request) {
       }, 400);
     }
 
-    // الرسالة
+
+    /* -----------------------------------------------------
+       الرسالة
+       ----------------------------------------------------- */
+
     const message =
-      typeof body.message === "string"
+      typeof body?.message === "string"
         ? body.message.trim()
         : "";
 
@@ -82,9 +93,13 @@ export default async function handler(request) {
       }, 400);
     }
 
-    // الموديل
+
+    /* -----------------------------------------------------
+       Model
+       ----------------------------------------------------- */
+
     let model =
-      typeof body.model === "string"
+      typeof body?.model === "string"
         ? body.model
         : "gpt-4o";
 
@@ -92,9 +107,13 @@ export default async function handler(request) {
       model = "gpt-4o";
     }
 
-    // History
+
+    /* -----------------------------------------------------
+       History
+       ----------------------------------------------------- */
+
     let history =
-      Array.isArray(body.history)
+      Array.isArray(body?.history)
         ? body.history
         : [];
 
@@ -109,12 +128,17 @@ export default async function handler(request) {
       )
       .slice(-20);
 
+
     const messages = history.map(item => ({
       role: item.role,
       content: item.content
     }));
 
-    // التأكد أن الرسالة الحالية موجودة
+
+    /* -----------------------------------------------------
+       إضافة الرسالة الحالية
+       ----------------------------------------------------- */
+
     if (
       !messages.length ||
       messages[messages.length - 1].content !== message
@@ -125,43 +149,104 @@ export default async function handler(request) {
       });
     }
 
-    // Payload
+
+    /* -----------------------------------------------------
+       Payload
+       ----------------------------------------------------- */
+
     const payload = {
       max_tokens: 4000,
       messages,
       model
     };
 
-    // إرسال الطلب إلى الخدمة
-    const response = await fetch(API_URL, {
-      method: "POST",
 
-      headers: {
-        "Content-Type": "application/json",
+    /* -----------------------------------------------------
+       Timeout
+       ----------------------------------------------------- */
 
-        // التوكن من Vercel
-        "authorization": authorization,
+    const controller =
+      new AbortController();
 
-        // بيانات التطبيق
-        "user-header":
-          "bundleId:com.chatbot.ai.aichat.openaibot.chat/versionApp:35.0.2/OS:Android/osVersion:36/userId:BERO",
+    const timeout =
+      setTimeout(() => {
+        controller.abort();
+      }, REQUEST_TIMEOUT);
 
-        "Accept-Encoding": "gzip",
 
-        "User-Agent": "okhttp/4.12.0"
-      },
+    /* -----------------------------------------------------
+       الاتصال بالخدمة الخارجية
+       ----------------------------------------------------- */
 
-      body: JSON.stringify(payload)
-    });
+    let response;
 
-    // قراءة الرد
-    const rawText = await response.text();
+    try {
+
+      response = await fetch(API_URL, {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+
+          "authorization": authorization,
+
+          "user-header":
+            "bundleId:com.chatbot.ai.aichat.openaibot.chat/versionApp:35.0.2/OS:Android/osVersion:36/userId:BERO",
+
+          "Accept-Encoding": "gzip",
+
+          "User-Agent": "okhttp/4.12.0"
+        },
+
+        body: JSON.stringify(payload),
+
+        signal: controller.signal
+      });
+
+    } catch (error) {
+
+      clearTimeout(timeout);
+
+      if (error?.name === "AbortError") {
+        return json({
+          ok: false,
+          error:
+            "الخدمة الخارجية لم تستجب خلال 30 ثانية."
+        }, 504);
+      }
+
+      return json({
+        ok: false,
+        error:
+          error?.message ||
+          "فشل الاتصال بالخدمة الخارجية."
+      }, 502);
+    }
+
+    clearTimeout(timeout);
+
+
+    /* -----------------------------------------------------
+       قراءة الرد
+       ----------------------------------------------------- */
+
+    const rawText =
+      await response.text();
+
+
+    /* -----------------------------------------------------
+       JSON
+       ----------------------------------------------------- */
 
     let data;
 
     try {
-      data = JSON.parse(rawText);
+
+      data =
+        JSON.parse(rawText);
+
     } catch {
+
       return json({
         ok: false,
         error:
@@ -170,7 +255,11 @@ export default async function handler(request) {
       }, 502);
     }
 
-    // إذا الخدمة رفضت الطلب
+
+    /* -----------------------------------------------------
+       أخطاء الخدمة الخارجية
+       ----------------------------------------------------- */
+
     if (!response.ok) {
 
       let errorMessage =
@@ -179,7 +268,9 @@ export default async function handler(request) {
         data?.message ||
         `الخدمة الخارجية رفضت الطلب (${response.status}).`;
 
-      if (typeof errorMessage !== "string") {
+      if (
+        typeof errorMessage !== "string"
+      ) {
         errorMessage =
           `الخدمة الخارجية رفضت الطلب (${response.status}).`;
       }
@@ -191,59 +282,87 @@ export default async function handler(request) {
       }, 502);
     }
 
-    // استخراج الرد
+
+    /* -----------------------------------------------------
+       استخراج الرد
+       ----------------------------------------------------- */
+
     let reply = "";
 
-    // OpenAI-style response
+
     if (
       Array.isArray(data?.choices) &&
       data.choices[0]?.message?.content
     ) {
+
       reply =
         data.choices[0].message.content;
+
     }
 
-    // data
+
     else if (
       typeof data?.data === "string"
     ) {
-      reply = data.data;
+
+      reply =
+        data.data;
+
     }
 
-    // content
+
     else if (
       typeof data?.content === "string"
     ) {
-      reply = data.content;
+
+      reply =
+        data.content;
+
     }
 
-    // reply
+
     else if (
       typeof data?.reply === "string"
     ) {
-      reply = data.reply;
+
+      reply =
+        data.reply;
+
     }
 
-    // لا يوجد رد
+
+    /* -----------------------------------------------------
+       لم نستلم جواب
+       ----------------------------------------------------- */
+
     if (!reply) {
+
       return json({
         ok: false,
         error:
           "تم الاتصال بالخدمة لكن لم يتم استلام نص الرد.",
-        raw: data
+        response: data
       }, 502);
     }
 
-    // نجاح
+
+    /* -----------------------------------------------------
+       نجاح
+       ----------------------------------------------------- */
+
     return json({
       ok: true,
       reply,
       model
     });
 
+
   } catch (error) {
 
-    console.error("BEGAMOB ERROR:", error);
+    console.error(
+      "NOVA AI ERROR:",
+      error
+    );
 
     return json({
       ok: false,
