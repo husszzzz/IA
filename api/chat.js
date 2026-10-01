@@ -23,6 +23,7 @@ function json(data, status = 200) {
 
 export default async function handler(request) {
 
+  // OPTIONS
   if (request.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -34,6 +35,7 @@ export default async function handler(request) {
     });
   }
 
+  // POST فقط
   if (request.method !== "POST") {
     return json({
       ok: false,
@@ -43,6 +45,7 @@ export default async function handler(request) {
 
   try {
 
+    // قراءة التوكن من Vercel Environment Variables
     const authorization =
       process.env.BEGAMOB_AUTHORIZATION || "";
 
@@ -54,13 +57,32 @@ export default async function handler(request) {
       }, 500);
     }
 
-    const body = await request.json();
+    // قراءة البيانات
+    let body;
 
+    try {
+      body = await request.json();
+    } catch {
+      return json({
+        ok: false,
+        error: "البيانات المرسلة ليست JSON صحيحة."
+      }, 400);
+    }
+
+    // الرسالة
     const message =
       typeof body.message === "string"
         ? body.message.trim()
         : "";
 
+    if (!message) {
+      return json({
+        ok: false,
+        error: "الرسالة فارغة."
+      }, 400);
+    }
+
+    // الموديل
     let model =
       typeof body.model === "string"
         ? body.model
@@ -70,13 +92,7 @@ export default async function handler(request) {
       model = "gpt-4o";
     }
 
-    if (!message) {
-      return json({
-        ok: false,
-        error: "الرسالة فارغة."
-      }, 400);
-    }
-
+    // History
     let history =
       Array.isArray(body.history)
         ? body.history
@@ -98,6 +114,7 @@ export default async function handler(request) {
       content: item.content
     }));
 
+    // التأكد أن الرسالة الحالية موجودة
     if (
       !messages.length ||
       messages[messages.length - 1].content !== message
@@ -108,24 +125,36 @@ export default async function handler(request) {
       });
     }
 
+    // Payload
     const payload = {
       max_tokens: 4000,
       messages,
       model
     };
 
+    // إرسال الطلب إلى الخدمة
     const response = await fetch(API_URL, {
       method: "POST",
 
       headers: {
         "Content-Type": "application/json",
+
+        // التوكن من Vercel
         "authorization": authorization,
-        "user-header": "NOVA-AI"
+
+        // بيانات التطبيق
+        "user-header":
+          "bundleId:com.chatbot.ai.aichat.openaibot.chat/versionApp:35.0.2/OS:Android/osVersion:36/userId:BERO",
+
+        "Accept-Encoding": "gzip",
+
+        "User-Agent": "okhttp/4.12.0"
       },
 
       body: JSON.stringify(payload)
     });
 
+    // قراءة الرد
     const rawText = await response.text();
 
     let data;
@@ -141,6 +170,7 @@ export default async function handler(request) {
       }, 502);
     }
 
+    // إذا الخدمة رفضت الطلب
     if (!response.ok) {
 
       let errorMessage =
@@ -161,8 +191,10 @@ export default async function handler(request) {
       }, 502);
     }
 
+    // استخراج الرد
     let reply = "";
 
+    // OpenAI-style response
     if (
       Array.isArray(data?.choices) &&
       data.choices[0]?.message?.content
@@ -171,31 +203,38 @@ export default async function handler(request) {
         data.choices[0].message.content;
     }
 
+    // data
     else if (
       typeof data?.data === "string"
     ) {
       reply = data.data;
     }
 
+    // content
     else if (
       typeof data?.content === "string"
     ) {
       reply = data.content;
     }
 
+    // reply
     else if (
       typeof data?.reply === "string"
     ) {
       reply = data.reply;
     }
 
+    // لا يوجد رد
     if (!reply) {
       return json({
         ok: false,
-        error: "تم الاتصال بالخدمة لكن لم يتم استلام نص الرد."
+        error:
+          "تم الاتصال بالخدمة لكن لم يتم استلام نص الرد.",
+        raw: data
       }, 502);
     }
 
+    // نجاح
     return json({
       ok: true,
       reply,
@@ -203,6 +242,8 @@ export default async function handler(request) {
     });
 
   } catch (error) {
+
+    console.error("BEGAMOB ERROR:", error);
 
     return json({
       ok: false,
