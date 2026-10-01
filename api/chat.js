@@ -1,374 +1,284 @@
-const API_URL =
-  "https://chatapi.begamob.com/api/v2/chatCustom";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-const AVAILABLE_MODELS = [
-  "gpt-4o",
-  "gpt-4o-mini",
-  "deepseek",
-  "gemini-2.0-flash"
-];
+// النموذج الأساسي
+const DEFAULT_MODEL = "gemini-2.5-flash";
 
-const REQUEST_TIMEOUT = 30000; // 30 ثانية
-
-function json(data, status = 200) {
+export async function GET() {
   return new Response(
-    JSON.stringify(data),
+    JSON.stringify({
+      ok: true,
+      service: "NOVA AI",
+      provider: "Google Gemini",
+      status: "online"
+    }),
     {
-      status,
+      status: 200,
       headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store"
+        "Content-Type": "application/json; charset=utf-8"
       }
     }
   );
 }
 
-
-/* =========================================================
-   GET
-   ========================================================= */
-
-export async function GET() {
-  return json({
-    ok: true,
-    service: "NOVA AI",
-    status: "online"
-  });
-}
-
-
-/* =========================================================
-   POST
-   ========================================================= */
-
 export async function POST(request) {
-
   try {
+    // =========================
+    // فحص المفتاح
+    // =========================
 
-    /* -----------------------------------------------------
-       Authorization من Vercel
-       ----------------------------------------------------- */
-
-    const authorization =
-      process.env.BEGAMOB_AUTHORIZATION || "";
-
-    if (!authorization) {
-      return json({
-        ok: false,
-        error:
-          "BEGAMOB_AUTHORIZATION غير موجود في Vercel."
-      }, 500);
+    if (!GEMINI_API_KEY) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "GEMINI_API_KEY_MISSING",
+          message: "لم يتم إضافة GEMINI_API_KEY في Vercel."
+        }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8"
+          }
+        }
+      );
     }
 
+    // =========================
+    // قراءة الطلب
+    // =========================
 
-    /* -----------------------------------------------------
-       قراءة JSON
-       ----------------------------------------------------- */
+    const body = await request.json();
 
-    let body;
+    const messages = Array.isArray(body.messages)
+      ? body.messages
+      : [];
 
-    try {
-      body = await request.json();
-    } catch {
-      return json({
-        ok: false,
-        error: "البيانات المرسلة ليست JSON صحيحة."
-      }, 400);
+    if (messages.length === 0) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "NO_MESSAGES",
+          message: "لم يتم إرسال أي رسالة."
+        }),
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8"
+          }
+        }
+      );
     }
 
+    // =========================
+    // تنظيف سجل المحادثة
+    // =========================
 
-    /* -----------------------------------------------------
-       الرسالة
-       ----------------------------------------------------- */
+    const history = messages
+      .filter((msg) => msg && typeof msg.content === "string")
+      .slice(-20)
+      .map((msg) => {
+        const role =
+          msg.role === "assistant" || msg.role === "model"
+            ? "model"
+            : "user";
 
-    const message =
-      typeof body?.message === "string"
-        ? body.message.trim()
-        : "";
+        return {
+          role,
+          parts: [
+            {
+              text: msg.content
+            }
+          ]
+        };
+      });
 
-    if (!message) {
-      return json({
-        ok: false,
-        error: "الرسالة فارغة."
-      }, 400);
+    if (history.length === 0) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "INVALID_MESSAGES"
+        }),
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8"
+          }
+        }
+      );
     }
 
+    // =========================
+    // اختيار الموديل
+    // =========================
+    // الواجهة القديمة قد ترسل:
+    // gpt-4o
+    // gpt-4o-mini
+    // deepseek
+    // gemini-2.0-flash
+    //
+    // كلها نحولها إلى Gemini
+    // =========================
 
-    /* -----------------------------------------------------
-       Model
-       ----------------------------------------------------- */
+    const requestedModel = body.model;
 
-    let model =
-      typeof body?.model === "string"
-        ? body.model
-        : "gpt-4o";
+    let model = DEFAULT_MODEL;
 
-    if (!AVAILABLE_MODELS.includes(model)) {
-      model = "gpt-4o";
+    if (requestedModel === "gemini-2.0-flash") {
+      model = "gemini-2.5-flash";
     }
-
-
-    /* -----------------------------------------------------
-       History
-       ----------------------------------------------------- */
-
-    let history =
-      Array.isArray(body?.history)
-        ? body.history
-        : [];
-
-    history = history
-      .filter(item =>
-        item &&
-        typeof item.content === "string" &&
-        (
-          item.role === "user" ||
-          item.role === "assistant"
-        )
-      )
-      .slice(-20);
-
-
-    const messages = history.map(item => ({
-      role: item.role,
-      content: item.content
-    }));
-
-
-    /* -----------------------------------------------------
-       إضافة الرسالة الحالية
-       ----------------------------------------------------- */
 
     if (
-      !messages.length ||
-      messages[messages.length - 1].content !== message
+      requestedModel === "gemini-2.5-flash" ||
+      requestedModel === "gemini-flash-latest"
     ) {
-      messages.push({
-        role: "user",
-        content: message
-      });
+      model = requestedModel;
     }
 
+    // =========================
+    // Gemini API
+    // =========================
 
-    /* -----------------------------------------------------
-       Payload
-       ----------------------------------------------------- */
+    const apiUrl =
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-    const payload = {
-      max_tokens: 4000,
-      messages,
-      model
-    };
+    const controller = new AbortController();
 
-
-    /* -----------------------------------------------------
-       Timeout
-       ----------------------------------------------------- */
-
-    const controller =
-      new AbortController();
-
-    const timeout =
-      setTimeout(() => {
-        controller.abort();
-      }, REQUEST_TIMEOUT);
-
-
-    /* -----------------------------------------------------
-       الاتصال بالخدمة الخارجية
-       ----------------------------------------------------- */
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 45000);
 
     let response;
 
     try {
-
-      response = await fetch(API_URL, {
+      response = await fetch(apiUrl, {
         method: "POST",
 
         headers: {
           "Content-Type": "application/json",
-
-          "authorization": authorization,
-
-          "user-header":
-            "bundleId:com.chatbot.ai.aichat.openaibot.chat/versionApp:35.0.2/OS:Android/osVersion:36/userId:BERO",
-
-          "Accept-Encoding": "gzip",
-
-          "User-Agent": "okhttp/4.12.0"
+          "x-goog-api-key": GEMINI_API_KEY
         },
 
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          contents: history,
+
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 4000
+          }
+        }),
 
         signal: controller.signal
       });
-
-    } catch (error) {
-
+    } finally {
       clearTimeout(timeout);
-
-      if (error?.name === "AbortError") {
-        return json({
-          ok: false,
-          error:
-            "الخدمة الخارجية لم تستجب خلال 30 ثانية."
-        }, 504);
-      }
-
-      return json({
-        ok: false,
-        error:
-          error?.message ||
-          "فشل الاتصال بالخدمة الخارجية."
-      }, 502);
     }
 
-    clearTimeout(timeout);
+    // =========================
+    // قراءة رد Gemini
+    // =========================
 
-
-    /* -----------------------------------------------------
-       قراءة الرد
-       ----------------------------------------------------- */
-
-    const rawText =
-      await response.text();
-
-
-    /* -----------------------------------------------------
-       JSON
-       ----------------------------------------------------- */
-
-    let data;
-
-    try {
-
-      data =
-        JSON.parse(rawText);
-
-    } catch {
-
-      return json({
-        ok: false,
-        error:
-          "الخدمة الخارجية أرسلت استجابة غير JSON.",
-        status: response.status
-      }, 502);
-    }
-
-
-    /* -----------------------------------------------------
-       أخطاء الخدمة الخارجية
-       ----------------------------------------------------- */
+    const data = await response.json();
 
     if (!response.ok) {
+      console.error("Gemini API error:", data);
 
-      let errorMessage =
-        data?.error?.message ||
-        data?.error ||
-        data?.message ||
-        `الخدمة الخارجية رفضت الطلب (${response.status}).`;
+      let errorMessage = "حدث خطأ من Gemini API.";
 
-      if (
-        typeof errorMessage !== "string"
-      ) {
-        errorMessage =
-          `الخدمة الخارجية رفضت الطلب (${response.status}).`;
+      if (data?.error?.message) {
+        errorMessage = data.error.message;
       }
 
-      return json({
-        ok: false,
-        error: errorMessage,
-        status: response.status
-      }, 502);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "GEMINI_API_ERROR",
+          status: response.status,
+          message: errorMessage
+        }),
+        {
+          status: response.status,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8"
+          }
+        }
+      );
     }
 
+    // =========================
+    // استخراج النص
+    // =========================
 
-    /* -----------------------------------------------------
-       استخراج الرد
-       ----------------------------------------------------- */
+    const text =
+      data?.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("") || "";
 
-    let reply = "";
+    if (!text) {
+      console.error("Gemini returned no text:", data);
 
-
-    if (
-      Array.isArray(data?.choices) &&
-      data.choices[0]?.message?.content
-    ) {
-
-      reply =
-        data.choices[0].message.content;
-
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "EMPTY_RESPONSE",
+          message: "Gemini لم يرجع نصًا."
+        }),
+        {
+          status: 502,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8"
+          }
+        }
+      );
     }
 
+    // =========================
+    // الرد للواجهة
+    // =========================
 
-    else if (
-      typeof data?.data === "string"
-    ) {
-
-      reply =
-        data.data;
-
-    }
-
-
-    else if (
-      typeof data?.content === "string"
-    ) {
-
-      reply =
-        data.content;
-
-    }
-
-
-    else if (
-      typeof data?.reply === "string"
-    ) {
-
-      reply =
-        data.reply;
-
-    }
-
-
-    /* -----------------------------------------------------
-       لم نستلم جواب
-       ----------------------------------------------------- */
-
-    if (!reply) {
-
-      return json({
-        ok: false,
-        error:
-          "تم الاتصال بالخدمة لكن لم يتم استلام نص الرد.",
-        response: data
-      }, 502);
-    }
-
-
-    /* -----------------------------------------------------
-       نجاح
-       ----------------------------------------------------- */
-
-    return json({
-      ok: true,
-      reply,
-      model
-    });
-
-
-  } catch (error) {
-
-    console.error(
-      "NOVA AI ERROR:",
-      error
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        model,
+        content: text
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8"
+        }
+      }
     );
 
-    return json({
-      ok: false,
-      error:
-        error?.message ||
-        "حدث خطأ داخلي في الخادم."
-    }, 500);
+  } catch (error) {
+    console.error("Chat API error:", error);
+
+    if (error?.name === "AbortError") {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "TIMEOUT",
+          message: "انتهت مهلة الاتصال مع Gemini."
+        }),
+        {
+          status: 504,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8"
+          }
+        }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error: "SERVER_ERROR",
+        message: error?.message || "حدث خطأ غير متوقع."
+      }),
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8"
+        }
+      }
+    );
   }
 }
